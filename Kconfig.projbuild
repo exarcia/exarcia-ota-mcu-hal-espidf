@@ -1,0 +1,82 @@
+menu "Exarcia OTA — ESP-IDF HAL"
+
+    comment "Platform mechanisms. Protocol and policy live in the exarcia_ota component."
+
+    config EXARCIA_HAL_NVS_PARTITION
+        string "NVS partition holding all Exarcia state"
+        default "exarcia"
+        help
+            Factory provisioning, rotated credentials and OTA bookkeeping.
+            The partition table must contain this entry; see
+            partitions_exarcia_4mb.csv. It is deliberately separate from the
+            default "nvs" partition, which stays with the application.
+
+    config EXARCIA_HAL_TRANSPORT
+        string "Bearer reported to Core (X-Transport)"
+        default "wifi"
+        help
+            Free-text bearer label used only for fleet attribution: which
+            network a device was reachable over. Values such as wifi, ethernet
+            or thread.
+
+    config EXARCIA_HAL_HTTP_TIMEOUT_MS
+        int "Core API timeout (ms)"
+        range 1000 120000
+        default 15000
+
+    config EXARCIA_HAL_OTA_TIMEOUT_MS
+        int "Firmware download timeout (ms)"
+        range 10000 3600000
+        default 300000
+
+    config EXARCIA_HAL_OTA_BUFFER_SIZE
+        int "HTTP receive buffer (bytes)"
+        range 512 16384
+        default 2048
+        help
+            Smaller saves RAM and produces more progress callbacks, which the
+            client throttles before reporting to Core.
+
+    config EXARCIA_HAL_ENABLE_PARTIAL_DOWNLOAD
+        bool "Download the image over multiple Range requests"
+        default n
+        help
+            Requires the image server to honour Range. Falls back to a single
+            request when it does not, so this is safe to enable against any
+            server.
+
+            Needs CONFIG_ESP_HTTPS_OTA_ENABLE_PARTIAL_DOWNLOAD at build time;
+            enabling it here without that build option logs a warning and uses
+            one request.
+
+    config EXARCIA_HAL_HTTP_REQUEST_SIZE
+        int "Bytes per Range request"
+        range 4096 1048576
+        default 32768
+        depends on EXARCIA_HAL_ENABLE_PARTIAL_DOWNLOAD
+
+    config EXARCIA_HAL_ENABLE_RESUMPTION
+        bool "Resume an interrupted download after a reboot"
+        default y
+        help
+            Persists the byte offset through the Exarcia NVS partition so a
+            power loss mid-download continues instead of restarting. Ignored
+            when the artifact URL differs from the one that was in flight.
+
+    config EXARCIA_HAL_TLS_SKIP_HOSTNAME
+        bool "Skip TLS hostname verification (LAB ONLY)"
+        default n
+        help
+            Certificate chain validation still happens; only the hostname check
+            is skipped. For isolated labs with a self-signed certificate whose
+            SAN does not match. Must stay disabled in production.
+
+    config EXARCIA_HAL_USE_CERT_BUNDLE
+        bool "Validate HTTPS with the ESP certificate bundle"
+        default y
+        select MBEDTLS_CERTIFICATE_BUNDLE
+        help
+            Ignored when a private CA is supplied through the application, since
+            an explicit CA is a deliberate choice.
+
+endmenu
