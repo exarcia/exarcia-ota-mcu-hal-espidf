@@ -12,5 +12,5 @@ description: ESP-IDF implementation of the Exarcia OTA HAL (LAYER 2).
 repository: https://github.com/exarcia/exarcia-ota-mcu-hal-espidf
 dependencies:
   exarcia_ota:
-    git: git@github.com:exarcia/exarcia-ota-mcu.git
+    git: https://github.com/exarcia/exarcia-ota-mcu.git
     version: "v0.1.0"
