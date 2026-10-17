@@ -1,0 +1,12 @@
+# ESP-IDF build artifacts
+build/
+sdkconfig
+sdkconfig.old
+*.o
+*.a
+managed_components/
+
+# Editors and OS metadata
+.DS_Store
+*.swp
+*~

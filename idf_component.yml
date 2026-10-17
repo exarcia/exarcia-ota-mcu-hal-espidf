@@ -1,0 +1,16 @@
+# ESP-IDF component manifest.
+#
+# LAYER 2: the ESP-IDF implementation of LAYER 1's HAL. It depends on
+# exarcia_ota for the interface types only, so a project that imports this
+# component gets LAYER 1 transitively and does not declare it directly.
+#
+# The git reference is a tag; the consuming project's dependencies.lock pins the
+# exact commit. Bump both the tag and the version below when cutting a release.
+version: "0.1.0"
+name: exarcia_hal_espidf
+description: ESP-IDF implementation of the Exarcia OTA HAL (LAYER 2).
+repository: https://github.com/juantinazzo/exarcia-ota-mcu-hal-espidf
+dependencies:
+  exarcia_ota:
+    git: git@github.com:exarcia/exarcia-ota-mcu.git
+    version: "v0.1.0"
