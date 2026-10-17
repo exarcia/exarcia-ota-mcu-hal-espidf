@@ -5,6 +5,10 @@ every **mechanism**: HTTPS transport, NVS storage, the clock, SHA-256 via PSA,
 and the OTA slot. Contains **no protocol logic** — no JSON, no endpoint paths, no
 deployment state.
 
+> The test suites and ESP-IDF API stubs named below live in the consuming
+> project, not in this repository. In the reference ESP-IDF demo they are under
+> `exarcia-demo-mcu-esp-idf/tests/`.
+
 ```
 LAYER 3  main/                          app_main, connectivity, provisioning
 LAYER 2  exarcia_hal_espidf   <-- this component
