@@ -50,7 +50,12 @@ typedef struct exarcia_hal_espidf {
     const esp_partition_t *staging;
     esp_https_ota_handle_t https_ota;
     char staged_version[32];
+    /* Borrowed from stage_begin() until esp_https_ota_begin() returns: the
+     * ESP-IDF client-init callback has no user argument. */
+    const exarcia_headers_t *stage_headers;
 } exarcia_hal_espidf_t;
+
+static exarcia_hal_espidf_t *stage_callback_owner;
 
 /* Helpers */
 
@@ -76,6 +81,13 @@ static exarcia_err_t from_esp_err(esp_err_t err)
         return EXARCIA_ERR_NO_SPACE;
     case ESP_ERR_TIMEOUT:
         return EXARCIA_ERR_UNAVAILABLE;
+    case ESP_ERR_NVS_NOT_FOUND:
+        return EXARCIA_ERR_NOT_FOUND;
+    case ESP_ERR_NVS_INVALID_LENGTH:
+    case ESP_ERR_NVS_VALUE_TOO_LONG:
+        return EXARCIA_ERR_BUFFER_TOO_SMALL;
+    case ESP_ERR_NVS_NOT_ENOUGH_SPACE:
+        return EXARCIA_ERR_NO_SPACE;
     default:
         return EXARCIA_ERR_UNAVAILABLE;
     }
@@ -176,8 +188,11 @@ static exarcia_err_t hal_store_get(void *user, const char *ns, const char *key,
     if (impl == NULL || ns == NULL || key == NULL || out == NULL || out_size == 0U) {
         return EXARCIA_ERR_INVALID_ARG;
     }
-    if (store_open(impl, ns, NVS_READONLY, &handle) != ESP_OK) {
-        return EXARCIA_ERR_NOT_FOUND;
+    {
+        esp_err_t open_err = store_open(impl, ns, NVS_READONLY, &handle);
+        if (open_err != ESP_OK) {
+            return from_esp_err(open_err);
+        }
     }
     {
         esp_err_t err = nvs_get_str(handle, key, out, &required);
@@ -494,6 +509,33 @@ static exarcia_err_t hal_request_restart(void *user)
 
 /* Staging */
 
+/* esp_https_ota_config_t.http_client_init_cb has no user argument, so the HAL
+ * instance is handed over through this file-static pointer for the duration of
+ * esp_https_ota_begin(). Only one OTA can be staged at a time. */
+static esp_err_t stage_http_client_init_cb(esp_http_client_handle_t client)
+{
+    exarcia_hal_espidf_t *impl = stage_callback_owner;
+    size_t index;
+
+    if (impl == NULL || impl->stage_headers == NULL || impl->stage_headers->items == NULL ||
+        client == NULL) {
+        return ESP_OK;
+    }
+    for (index = 0U; index < impl->stage_headers->count; ++index) {
+        const exarcia_header_t *header = &impl->stage_headers->items[index];
+        esp_err_t err;
+
+        if (header->name == NULL || header->value == NULL) {
+            continue;
+        }
+        err = esp_http_client_set_header(client, header->name, header->value);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    return ESP_OK;
+}
+
 static exarcia_err_t hal_stage_begin(void *user, exarcia_stage_t *stage, const char *url)
 {
     exarcia_hal_espidf_t *impl = self(user);
@@ -521,25 +563,42 @@ static exarcia_err_t hal_stage_begin(void *user, exarcia_stage_t *stage, const c
     http_config.url = url;
     http_config.timeout_ms = impl->config.ota_timeout_ms;
     http_config.buffer_size = impl->config.ota_buffer_size;
-    /* No device credentials here on purpose: this is a presigned object-storage
-     * URL, and forwarding X-PSK there would leak the credential into a third
-     * party's access logs. */
+    /* Device credentials are forwarded only when LAYER 1 supplied headers for
+     * a Core device-API URL. A presigned storage URL gets an empty set, so the
+     * PSK cannot leak into a third party's access logs. Refuse redirects only
+     * while credentials are attached. */
+    http_config.disable_auto_redirect =
+        stage->headers != NULL && stage->headers->count > 0U;
     configure_tls(&http_config, &impl->config);
 
     memset(&ota_config, 0, sizeof(ota_config));
     ota_config.http_config = &http_config;
     ota_config.partition.staging = impl->staging;
+    ota_config.http_client_init_cb = stage_http_client_init_cb;
     if (impl->config.enable_resumption && stage->resume_offset > 0U) {
-        /* esp_https_ota silently ignores a resume offset below its internal
-         * minimum, which is harmless. */
-        ota_config.ota_resumption = true;
-        ota_config.ota_image_bytes_written = stage->resume_offset;
-        ESP_LOGI(TAG, "resuming at %zu bytes", stage->resume_offset);
+        if (stage->headers != NULL && stage->headers->count > 0U) {
+            /* Current Core streams the whole payload and does not honour Range.
+             * Sending a Range header would make esp_https_ota append a full
+             * image at a resume offset, so restart from zero for Core URLs. */
+            ESP_LOGW(TAG, "resumption disabled for an authenticated Core payload");
+        } else {
+            /* esp_https_ota silently ignores a resume offset below its internal
+             * minimum, which is harmless. */
+            ota_config.ota_resumption = true;
+            ota_config.ota_image_bytes_written = stage->resume_offset;
+            ESP_LOGI(TAG, "resuming at %zu bytes", stage->resume_offset);
+        }
     }
 #if CONFIG_ESP_HTTPS_OTA_ENABLE_PARTIAL_DOWNLOAD
     if (impl->config.enable_partial_download) {
-        ota_config.partial_http_download = true;
-        ota_config.max_http_request_size = impl->config.http_request_size;
+        if (stage->headers != NULL && stage->headers->count > 0U) {
+            /* Core does not honour Range, so a partial request would receive the
+             * full image and write it more than once. */
+            ESP_LOGW(TAG, "partial download disabled for an authenticated Core payload");
+        } else {
+            ota_config.partial_http_download = true;
+            ota_config.max_http_request_size = impl->config.http_request_size;
+        }
     }
 #else
     if (impl->config.enable_partial_download) {
@@ -549,8 +608,12 @@ static exarcia_err_t hal_stage_begin(void *user, exarcia_stage_t *stage, const c
 
     impl->https_ota = NULL;
     impl->staged_version[0] = '\0';
+    impl->stage_headers = stage->headers;
+    stage_callback_owner = impl;
     {
         esp_err_t err = esp_https_ota_begin(&ota_config, &impl->https_ota);
+        impl->stage_headers = NULL;
+        stage_callback_owner = NULL;
         if (err != ESP_OK) {
             impl->staging = NULL;
             ESP_LOGE(TAG, "esp_https_ota_begin failed: %s", esp_err_to_name(err));

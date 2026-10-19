@@ -6,11 +6,11 @@
 #
 # The git reference is a tag; the consuming project's dependencies.lock pins the
 # exact commit. Bump both the tag and the version below when cutting a release.
-version: "0.1.0"
+version: "0.2.0"
 name: exarcia_hal_espidf
 description: ESP-IDF implementation of the Exarcia OTA HAL (LAYER 2).
 repository: https://github.com/exarcia/exarcia-ota-mcu-hal-espidf
 dependencies:
   exarcia_ota:
     git: https://github.com/exarcia/exarcia-ota-mcu.git
-    version: "v0.1.0"
+    version: "v0.2.0"
