@@ -276,7 +276,16 @@ Never log a download URL, a PSK or a parameter document.
 | Device rolls back after an update | The application must run the Exarcia task early enough to confirm the image |
 | Logs are missing | The log ring is full, `log_upload_level` filters the entry, or the batch is empty |
 
-## 12. Design notes
+## 12. Optional MQTT messaging
+
+MQTT is not part of the OTA HAL. If the application also needs MQTT, add the
+separate `exarcia_mqtt_espidf` component. It reads the MQTT credentials from a
+parameter deployment, defaults to QoS 0, and keeps its ESP-MQTT task independent
+of `exarcia_ota_tick()`.
+
+---
+
+## 13. Design notes
 
 - `stage_finish()` is the only call permitted to switch the boot slot.
   `stage_abort()` must leave the running image selected and bootable.
