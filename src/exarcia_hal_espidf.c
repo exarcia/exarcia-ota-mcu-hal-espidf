@@ -10,6 +10,7 @@
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
 #include "esp_log.h"
+#include "esp_log_level.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
@@ -931,6 +932,9 @@ esp_err_t exarcia_hal_espidf_init(exarcia_hal_t *hal, const exarcia_hal_espidf_c
     impl->hal.user = impl;
 
     *hal = impl->hal;
+
+    esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
+
     return ESP_OK;
 }
 
