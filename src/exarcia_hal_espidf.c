@@ -50,7 +50,7 @@ typedef struct exarcia_hal_espidf {
 
     const esp_partition_t *staging;
     esp_https_ota_handle_t https_ota;
-    char staged_version[32];
+    char staged_version[EXARCIA_APP_VERSION_MAX];
     /* Borrowed from stage_begin() until esp_https_ota_begin() returns: the
      * ESP-IDF client-init callback has no user argument. */
     const exarcia_headers_t *stage_headers;
@@ -171,10 +171,14 @@ static esp_err_t store_open(exarcia_hal_espidf_t *impl, const char *ns, nvs_open
     esp_err_t err = nvs_open_from_partition(impl->nvs_partition, ns, mode, out);
 
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "erasing Exarcia partition '%s': %s", impl->nvs_partition, esp_err_to_name(err));
-        if (nvs_flash_erase_partition(impl->nvs_partition) == ESP_OK) {
-            err = nvs_open_from_partition(impl->nvs_partition, ns, mode, out);
-        }
+        /* Never erase automatically: this partition holds the device UUID, PSK
+         * and the pending OTA record. Losing it turns a recoverable storage
+         * problem (or an NVS format change followed by a rollback) into a
+         * device that must be re-provisioned in the factory. */
+        ESP_LOGE(TAG,
+                 "Exarcia partition '%s' cannot be opened (%s); refusing to erase "
+                 "provisioning. Re-flash the factory NVS image or erase it explicitly.",
+                 impl->nvs_partition, esp_err_to_name(err));
     }
     return err;
 }
@@ -537,6 +541,29 @@ static esp_err_t stage_http_client_init_cb(esp_http_client_handle_t client)
     return ESP_OK;
 }
 
+/* Read the descriptor from the bytes downloaded for this update, not from the
+ * inactive partition: at stage_begin() the partition still holds whatever was
+ * there before (often the previous release on a reused slot). Using the
+ * partition reader here can therefore persist the old version and make the next
+ * boot misdiagnose a successful activation as a rollback. */
+static void capture_staged_version(exarcia_hal_espidf_t *impl)
+{
+    esp_app_desc_t staged;
+
+    if (impl == NULL || impl->https_ota == NULL || impl->staging == NULL ||
+        impl->staged_version[0] != '\0') {
+        return;
+    }
+    if (esp_https_ota_get_img_desc(impl->https_ota, &staged) != ESP_OK) {
+        ESP_LOGW(TAG, "could not read the staged image descriptor yet");
+        return;
+    }
+    if (strlen(staged.version) >= EXARCIA_APP_VERSION_MAX) {
+        ESP_LOGW(TAG, "staged version is too long for esp_app_desc_t; it will not match");
+    }
+    snprintf(impl->staged_version, sizeof(impl->staged_version), "%s", staged.version);
+}
+
 static exarcia_err_t hal_stage_begin(void *user, exarcia_stage_t *stage, const char *url)
 {
     exarcia_hal_espidf_t *impl = self(user);
@@ -622,15 +649,6 @@ static exarcia_err_t hal_stage_begin(void *user, exarcia_stage_t *stage, const c
         }
     }
 
-    /* Capture the staged descriptor now: after finish() the slot is active and
-     * this would read the wrong partition. */
-    {
-        esp_app_desc_t staged;
-        if (esp_ota_get_partition_description(impl->staging, &staged) == ESP_OK) {
-            snprintf(impl->staged_version, sizeof(impl->staged_version), "%s", staged.version);
-        }
-    }
-
     stage->state = EXARCIA_STAGE_ACTIVE;
     return EXARCIA_OK;
 }
@@ -678,6 +696,7 @@ static exarcia_err_t hal_stage_run(void *user, exarcia_stage_t *stage,
         return EXARCIA_ERR_SIZE_MISMATCH;
     }
 
+    capture_staged_version(impl);
     stage->state = EXARCIA_STAGE_FINISHED;
     return EXARCIA_OK;
 }
@@ -896,11 +915,11 @@ esp_err_t exarcia_hal_espidf_init(exarcia_hal_t *hal, const exarcia_hal_espidf_c
         return err;
     }
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "erasing Exarcia partition '%s': %s", impl->nvs_partition, esp_err_to_name(err));
-        err = nvs_flash_erase_partition(impl->nvs_partition);
-        if (err == ESP_OK) {
-            err = nvs_flash_init_partition(impl->nvs_partition);
-        }
+        ESP_LOGE(TAG,
+                 "Exarcia partition '%s' needs recovery (%s); refusing to erase "
+                 "provisioning automatically. Re-flash the factory NVS image or "
+                 "erase the partition explicitly.",
+                 impl->nvs_partition, esp_err_to_name(err));
     }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Exarcia NVS init failed: %s", esp_err_to_name(err));

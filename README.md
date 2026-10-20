@@ -19,9 +19,9 @@ ESP-IDF project.
 - ESP-IDF v5.3 or newer. The HAL uses
   `esp_https_ota_config_t.http_client_init_cb` and is developed against v5.3,
   v5.5 and v6.0.
-- v0.2.0 or newer of both components. Version 0.2.0 added the authenticated
-  stage-header hand-off and parameter delivery; LAYER 1 and LAYER 2 must be
-  built from matching versions.
+- v0.3.0 or newer of both components. Version 0.3.0 adds the corrected staged
+  version capture and the non-destructive NVS policy; LAYER 1 and LAYER 2 must
+  be built from matching versions.
 - An `exarcia` NVS partition in the partition table. The HAL deliberately does
   not store Exarcia state in the application's default `nvs` partition.
 - Network connectivity already established by the application. The HAL does not
@@ -34,7 +34,7 @@ ESP-IDF project.
 ## 2. Add the component to a project
 
 Add `exarcia_hal_espidf` as a dependency in the project's
-`main/idf_component.yml`, using the v0.2.0 release. The component manager pulls
+`main/idf_component.yml`, using the v0.3.0 release. The component manager pulls
 `exarcia_ota` transitively, so you do not declare it separately.
 
 For local development, declare both components with `override_path` in the same
@@ -65,6 +65,11 @@ to the application's `nvs` partition.
 
 On an orderly shutdown call `exarcia_hal_espidf_deinit()`. It releases the NVS
 and OTA handles; it does not change the boot slot.
+
+The HAL never erases the Exarcia NVS partition automatically. If the partition
+reports `ESP_ERR_NVS_NO_FREE_PAGES` or a newer NVS format, initialization fails
+with a clear log instead of silently destroying the device UUID, PSK and pending
+OTA record. Recovery is an explicit factory re-provisioning step.
 
 ## 4. Kconfig
 
@@ -227,9 +232,16 @@ When Core offers a firmware artifact:
 The ESP-IDF OTA recipe emits one payload (`ota-app.bin`). The MCU client installs
 that primary payload; multi-payload install plans are outside this component.
 
-Set `PROJECT_VER` to your release version so the running application version
-matches the artifact version. The client uses the app descriptor for boot
-confirmation, but Core uses the reported version to suppress duplicate offers.
+Set `PROJECT_VER` (or a root `version.txt`) to your release version so the
+running application version matches the artifact version. The client uses the
+app descriptor for boot confirmation, but Core uses the reported version to
+suppress duplicate offers. The value must fit `esp_app_desc_t.version`, i.e. at
+most 31 visible characters; numeric `MAJOR.MINOR.PATCH` is recommended.
+
+`stage_run()` captures the staged application version from the downloaded image
+header, not from the inactive partition, and `get_staged_app_version()` returns
+it. This matters on a reused A/B slot: reading the partition before the download
+would return the previous image's version.
 
 Firmware artifacts are currently expected to be unsigned. If signing is enabled
 on Core, this client does not verify the envelope; do not enable signing for
