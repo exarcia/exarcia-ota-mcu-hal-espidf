@@ -13,4 +13,3 @@ repository: https://github.com/exarcia/exarcia-ota-mcu-hal-espidf
 dependencies:
   exarcia_ota:
     git: https://github.com/exarcia/exarcia-ota-mcu.git
-    version: "v0.2.0"
