@@ -23,6 +23,7 @@ idf_component_register(
         esp_system           # esp_restart
         esp_timer
         log
-        mbedtls              # esp_crt_bundle.h, psa/crypto.h
+        mbedtls              # psa/crypto.h
         nvs_flash
+        utils
 )

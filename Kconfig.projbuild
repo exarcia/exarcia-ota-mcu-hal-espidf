@@ -2,6 +2,8 @@ menu "Exarcia OTA — ESP-IDF HAL"
 
     comment "Platform mechanisms. Protocol and policy live in the exarcia_ota component."
 
+    comment "An explicit CA (ca_pem) always wins. The ESP bundle is optional for applications that opt in; this product supplies a pinned allowlist and sets use_cert_bundle=false."
+
     config EXARCIA_HAL_NVS_PARTITION
         string "NVS partition holding all Exarcia state"
         default "exarcia"
@@ -63,6 +65,17 @@ menu "Exarcia OTA — ESP-IDF HAL"
             power loss mid-download continues instead of restarting. Ignored
             when the artifact URL differs from the one that was in flight.
 
+    config EXARCIA_HAL_USE_CERT_BUNDLE
+        bool "Validate HTTPS with the ESP certificate bundle"
+        default y
+        select MBEDTLS_CERTIFICATE_BUNDLE
+        help
+            Used only when the application does not supply an explicit ca_pem.
+            An explicit CA always wins and the bundle is never attached as a
+            fallback. Set to n to require an explicit CA and fail closed when it
+            is missing. The kiln controller sets n and pins ISRG Root X2 plus
+            GTS Root R4.
+
     config EXARCIA_HAL_TLS_SKIP_HOSTNAME
         bool "Skip TLS hostname verification (LAB ONLY)"
         default n
@@ -70,13 +83,5 @@ menu "Exarcia OTA — ESP-IDF HAL"
             Certificate chain validation still happens; only the hostname check
             is skipped. For isolated labs with a self-signed certificate whose
             SAN does not match. Must stay disabled in production.
-
-    config EXARCIA_HAL_USE_CERT_BUNDLE
-        bool "Validate HTTPS with the ESP certificate bundle"
-        default y
-        select MBEDTLS_CERTIFICATE_BUNDLE
-        help
-            Ignored when a private CA is supplied through the application, since
-            an explicit CA is a deliberate choice.
 
 endmenu

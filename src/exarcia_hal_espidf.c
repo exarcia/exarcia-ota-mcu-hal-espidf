@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_app_desc.h"
 #include "esp_crt_bundle.h"
@@ -12,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_log_level.h"
 #include "esp_mac.h"
+#include "mem_diag.h"
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
 #include "esp_ota_ops.h"
@@ -116,6 +118,11 @@ static void hal_log(void *user, exarcia_log_level_t level, const char *message)
 
 static void configure_tls(esp_http_client_config_t *http, const exarcia_hal_espidf_config_t *config)
 {
+    /* An explicit CA always wins. The bundle remains available to applications
+     * that opt into it (use_cert_bundle), but it is never a fallback for a
+     * missing explicit CA: with neither option set the handshake fails closed.
+     * The kiln controller supplies DEVICE_TLS_CA_PEM and sets
+     * use_cert_bundle=false, so no bundle code is reachable there. */
     if (config->ca_present && config->ca_pem != NULL && config->ca_pem[0] != '\0') {
         http->cert_pem = config->ca_pem;
     } else if (config->use_cert_bundle) {
@@ -134,21 +141,57 @@ static uint64_t hal_now_ms(void *user)
     return (uint64_t)(esp_timer_get_time() / 1000LL);
 }
 
+/* Any certificate the device trusts was issued after 2024. An RTC that lost
+ * power reads 2001, so this floor distinguishes "clock not set yet" from a
+ * genuine (if wrong-timezone) clock without hardcoding the certificate dates. */
+#define EXARCIA_MIN_VALID_UNIX_TIME 1704067200LL /* 2024-01-01T00:00:00Z */
+
+static int64_t hal_wall_clock(void)
+{
+    return (int64_t) time(NULL);
+}
+
+bool exarcia_hal_espidf_clock_is_valid(void)
+{
+    return hal_wall_clock() >= EXARCIA_MIN_VALID_UNIX_TIME;
+}
+
 esp_err_t exarcia_hal_espidf_sync_clock(exarcia_hal_t *hal, int timeout_ms)
 {
-    if (hal == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
     esp_sntp_config_t sntp = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    esp_err_t err;
 
-    if (esp_netif_sntp_init(&sntp) != ESP_OK) {
-        ESP_LOGW(TAG, "SNTP init failed; HTTPS may fail until the clock is valid");
+    (void) hal;
+    err = esp_netif_sntp_init(&sntp);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "SNTP init failed; TLS stays disabled until the clock is valid");
         return ESP_FAIL;
     }
     if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS((uint32_t)timeout_ms)) != ESP_OK) {
-        ESP_LOGW(TAG, "SNTP sync timed out; continuing with the current clock");
+        ESP_LOGW(TAG,
+                 "SNTP sync timed out after %d ms; TLS stays disabled until the clock is valid",
+                 timeout_ms);
+        esp_netif_sntp_deinit();
         return ESP_ERR_TIMEOUT;
     }
+    if (!exarcia_hal_espidf_clock_is_valid()) {
+        ESP_LOGW(TAG, "SNTP reported success but the clock is still invalid; TLS stays disabled");
+        esp_netif_sntp_deinit();
+        return ESP_ERR_INVALID_STATE;
+    }
+    {
+        time_t now = time(NULL);
+        struct tm utc;
+        char text[32] = "?";
+
+        if (gmtime_r(&now, &utc) != NULL) {
+            (void) strftime(text, sizeof(text), "%Y-%m-%dT%H:%M:%SZ", &utc);
+        }
+        ESP_LOGI(TAG, "clock synchronized: %s", text);
+    }
+    /* The wall clock is set; release the SNTP client's buffers. A later retry
+     * re-initialises it from scratch. */
+    esp_netif_sntp_deinit();
     return ESP_OK;
 }
 
@@ -318,6 +361,17 @@ static exarcia_err_t hal_http_request(void *user, const char *method, const char
     if (impl == NULL || url == NULL || out == NULL) {
         return EXARCIA_ERR_INVALID_ARG;
     }
+    /* Fail without touching the network while the RTC still reads 2001. mbedTLS
+     * would reject every chain as "not yet valid" and report -0x2700, which is
+     * indistinguishable from a real trust failure in the field. */
+    if (!exarcia_hal_espidf_clock_is_valid()) {
+        static bool warned;
+        if (!warned) {
+            ESP_LOGW(TAG, "System clock is not set yet; HTTPS/OTA is deferred until SNTP completes");
+            warned = true;
+        }
+        return EXARCIA_ERR_UNAVAILABLE;
+    }
     memset(out, 0, sizeof(*out));
 
     err = to_http_method(method, &http_method);
@@ -339,6 +393,7 @@ static exarcia_err_t hal_http_request(void *user, const char *method, const char
     http_config.user_data = &response;
     configure_tls(&http_config, &impl->config);
 
+    mem_diag_log("hal:http_init");
     client = esp_http_client_init(&http_config);
     if (client == NULL) {
         return EXARCIA_ERR_NO_SPACE;
@@ -358,6 +413,7 @@ static exarcia_err_t hal_http_request(void *user, const char *method, const char
     if (err == ESP_OK) {
         err = esp_http_client_perform(client);
     }
+    mem_diag_log("hal:http_performed");
 
     /* Read the status code even when perform() failed.
      *
@@ -371,6 +427,7 @@ static exarcia_err_t hal_http_request(void *user, const char *method, const char
     {
         int status = esp_http_client_get_status_code(client);
         esp_http_client_cleanup(client);
+        mem_diag_log("hal:http_cleaned");
 
         if (status > 0) {
             /* An HTTP response is more informative than the transport error, and
@@ -638,10 +695,12 @@ static exarcia_err_t hal_stage_begin(void *user, exarcia_stage_t *stage, const c
     impl->staged_version[0] = '\0';
     impl->stage_headers = stage->headers;
     stage_callback_owner = impl;
+    mem_diag_log("hal:ota_begin");
     {
         esp_err_t err = esp_https_ota_begin(&ota_config, &impl->https_ota);
         impl->stage_headers = NULL;
         stage_callback_owner = NULL;
+        mem_diag_log("hal:ota_begin_done");
         if (err != ESP_OK) {
             impl->staging = NULL;
             ESP_LOGE(TAG, "esp_https_ota_begin failed: %s", esp_err_to_name(err));
@@ -739,6 +798,7 @@ static exarcia_err_t hal_stage_digest(void *user, exarcia_stage_t *stage, size_t
     if (chunk == NULL) {
         return EXARCIA_ERR_NO_SPACE;
     }
+    mem_diag_log("hal:digest_chunk");
     if (psa_crypto_init() != PSA_SUCCESS) {
         free(chunk);
         return EXARCIA_ERR_IO;
@@ -770,6 +830,7 @@ static exarcia_err_t hal_stage_digest(void *user, exarcia_stage_t *stage, size_t
         remaining -= take;
     }
     free(chunk);
+    mem_diag_log("hal:digest_chunk_freed");
 
     {
         size_t digest_length = 0U;
@@ -800,6 +861,7 @@ static exarcia_err_t hal_stage_finish(void *user, exarcia_stage_t *stage)
      * esp_ota_set_boot_partition(). */
     err = esp_https_ota_finish(impl->https_ota);
     impl->https_ota = NULL;
+    mem_diag_log("hal:ota_finished");
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_https_ota_finish failed: %s", esp_err_to_name(err));
         return from_esp_err(err);
@@ -821,6 +883,7 @@ static void hal_stage_abort(void *user, exarcia_stage_t *stage)
          * after a verification failure. */
         (void)esp_https_ota_abort(impl->https_ota);
         impl->https_ota = NULL;
+        mem_diag_log("hal:ota_aborted");
     }
     impl->staging = NULL;
     stage->state = EXARCIA_STAGE_ABORTED;

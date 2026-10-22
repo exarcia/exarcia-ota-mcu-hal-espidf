@@ -27,7 +27,11 @@ ESP-IDF project.
 - Network connectivity already established by the application. The HAL does not
   own Wi-Fi, Ethernet, Thread or a modem.
 - A valid clock before the first HTTPS request. Call
-  `exarcia_hal_espidf_sync_clock()` or use your own SNTP/RTC setup.
+  `exarcia_hal_espidf_sync_clock()` or use your own SNTP/RTC setup. Until the
+  clock is valid, every HTTPS/OTA request is refused with
+  `EXARCIA_ERR_UNAVAILABLE`; check `exarcia_hal_espidf_clock_is_valid()` before
+  starting wss:// MQTT as well. This prevents a dead RTC (2001) from producing
+  `MBEDTLS_ERR_X509_CERT_VERIFY_FAILED` before SNTP corrects the clock.
 - A device identity and PSK provisioned by your factory tooling, or seeded in
   firmware for bench testing.
 
@@ -85,7 +89,6 @@ The HAL exposes these options:
 | `CONFIG_EXARCIA_HAL_ENABLE_PARTIAL_DOWNLOAD` | n | Range-based partial downloads, not used for Core URLs |
 | `CONFIG_EXARCIA_HAL_HTTP_REQUEST_SIZE` | 32768 | Bytes per Range request when partial download is enabled |
 | `CONFIG_EXARCIA_HAL_ENABLE_RESUMPTION` | y | Resume a transfer from a presigned URL only |
-| `CONFIG_EXARCIA_HAL_USE_CERT_BUNDLE` | y | Validate HTTPS with the ESP certificate bundle |
 | `CONFIG_EXARCIA_HAL_TLS_SKIP_HOSTNAME` | n | Lab only: keep chain validation, skip hostname |
 
 `CONFIG_EXARCIA_HAL_ENABLE_PARTIAL_DOWNLOAD` additionally requires
@@ -102,9 +105,24 @@ Select the SoC with the normal ESP-IDF target mechanism, for example
 `idf.py set-target esp32s3`. The same value must be used for
 `capabilities.platform` and must match the Core target and artifact platform.
 
-For TLS, the default trusts the ESP certificate bundle. To use a private CA,
-set `ca_pem` and `ca_present` in `exarcia_hal_espidf_config_t` before
-`exarcia_hal_espidf_init()`. `tls_skip_hostname` is lab-only.
+For TLS, the application can set `ca_pem` and `ca_present` in
+`exarcia_hal_espidf_config_t` before `exarcia_hal_espidf_init()`. When they are
+set they win for every HAL HTTPS call (Core API, heartbeat, log upload, OTA
+metadata and artifact downloads). If no explicit CA is supplied, the HAL can
+validate against the ESP certificate bundle when `use_cert_bundle` is true
+(`CONFIG_EXARCIA_HAL_USE_CERT_BUNDLE`); if both are unset the connection fails
+closed. This product sets the pinned allowlist and `use_cert_bundle = false`, so
+the bundle is never attached.
+
+The Exarcia device allowlist contains only the self-signed ISRG Root X2 and GTS
+Root R4 anchors. Do not use the cross-signed certificates sent in the server
+chain: `esp_crt_bundle` verifies the top server-sent ISRG Root X2 cross-certificate
+against ISRG Root X1, which needs an RSA-4096 operation that these devices cannot
+allocate (error `0x4290`). The bundle is also unsuitable for this product after
+the eMudhra compromise because it contains eMudhra/AAA roots.
+
+`tls_skip_hostname` is lab-only. Keep it disabled so hostname verification stays
+on.
 
 ## 5. Provisioning
 

@@ -48,11 +48,14 @@ extern "C" {
 typedef struct exarcia_hal_espidf_config {
     /* NULL or "" selects CONFIG_EXARCIA_HAL_NVS_PARTITION. */
     const char *nvs_partition;
-    /* Private CA in PEM form. NULL when unused. */
+    /* Explicit CA allowlist in PEM form. When set it always wins and
+     * use_cert_bundle is ignored. Borrowed for the lifetime of the HAL. */
     const char *ca_pem;
     bool ca_present;
-    /* Trust the ESP certificate bundle. Ignored when ca_present is set, since a
-     * private CA is an explicit choice. */
+    /* Optional fallback for applications that do not supply a CA: validate
+     * against the ESP certificate bundle. Ignored when ca_present/ca_pem are
+     * set, because an explicit CA is authoritative. The kiln controller keeps
+     * this false. */
     bool use_cert_bundle;
     /* Lab only: keeps chain validation, skips hostname verification. */
     bool tls_skip_hostname;
@@ -82,9 +85,16 @@ esp_err_t exarcia_hal_espidf_init(exarcia_hal_t *hal, const exarcia_hal_espidf_c
 void exarcia_hal_espidf_deinit(exarcia_hal_t *hal);
 
 /* SNTP over the application's existing network. Call once L3 is up and before
- * the first HTTPS request, since TLS rejects an unvalidated clock. Best effort:
- * a failure is logged and the caller continues. */
+ * the first HTTPS request, since TLS rejects an unvalidated clock. On timeout
+ * the request gate below keeps every TLS call deferred until SNTP succeeds, so
+ * the device never presents a 2001 RTC timestamp to a certificate verifier. */
 esp_err_t exarcia_hal_espidf_sync_clock(exarcia_hal_t *hal, int timeout_ms);
+
+/* True once the system clock is past the build's certificate-validity floor.
+ * Every HTTPS/OTA request is refused with EXARCIA_ERR_UNAVAILABLE while this is
+ * false, and MQTT is not started, so a dead RTC cannot produce a misleading
+ * MBEDTLS_ERR_X509_CERT_VERIFY_FAILED before SNTP corrects the clock. */
+bool exarcia_hal_espidf_clock_is_valid(void);
 
 /* Value for the X-Transport header, so the backend can attribute connectivity
  * per device. Derived from which netif is up. */
